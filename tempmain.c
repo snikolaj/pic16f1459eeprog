@@ -89,8 +89,11 @@ uint8_t circ_bbuf_pop(circ_bbuf_t *c, uint8_t *data){
 static uint8_t readBuffer[32];
 static uint8_t writeBuffer[32];
 
-uint8_t msgBufPhysical[BUF_SIZE];
-circ_bbuf_t msgBuf;
+uint8_t recvCircBufPhysical[BUF_SIZE];
+circ_bbuf_t recvCircBuf;
+
+uint8_t sendCircBufPhysical[BUF_SIZE];
+circ_bbuf_t sendCircBuf;
 
 /*void MCC_USB_CDC_DemoTasks(void)
 {
@@ -142,25 +145,26 @@ void writeAddress(uint16_t address){
 }
 uint8_t readByte(uint16_t address){
     writeAddress(address);
+    OE_373_LAT = 0; // set output enable for buffers
     TRISC = 0xFF; // set data pins as input
     CE_LAT = 0; // enable EEPROM on
     OE_LAT = 0; // enable EEPROM read on
     uint8_t eepromRead = PORTC;
     OE_LAT = 1;
     CE_LAT = 1;
+    OE_373_LAT = 1; // turn off the buffers
     return eepromRead;
 }
 void writeByte(uint8_t byte, uint16_t address){
     writeAddress(address);
+    OE_373_LAT = 0;
     TRISC = 0;
     LATC = byte;
     CE_LAT = 0;
     WE_LAT = 0;
-    for(uint8_t i = 0; i < 240; i++){
-        LATC = byte;
-    }
     WE_LAT = 1;
     CE_LAT = 1;
+    OE_373_LAT = 0;
 }
 
 const char hexArr[] = {'0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'A', 'B', 'C', 'D', 'E', 'F'};
@@ -180,12 +184,21 @@ void USBTransfer(){
         numBytesRead = getsUSBUSART(readBuffer, sizeof(readBuffer));
         
         for(uint8_t i = 0; i < numBytesRead; i++){
-            if(circ_bbuf_push(&msgBuf, readBuffer[i])){
+            if(circ_bbuf_push(&recvCircBuf, readBuffer[i])){
                 writeBuffer[0] = 'R'; // retry later
                 putUSBUSART(writeBuffer, 1);
                 return;
             }
         }
+        uint8_t i;
+        uint8_t temp;
+        for(i = 0; i < 32; i++){
+            if(circ_bbuf_pop(&sendCircBuf, &temp)){
+                break;
+            }
+            writeBuffer[i] = temp;
+        }
+        putUSBUSART(writeBuffer, i);
     }
     CDCTxService();
 }
@@ -197,19 +210,25 @@ void main(void)
     INTERRUPT_GlobalInterruptEnable();
     INTERRUPT_PeripheralInterruptEnable();
     
-    msgBuf.buffer = msgBufPhysical;
-    msgBuf.head = 0;
-    msgBuf.tail = 0;
-    msgBuf.maxlen = BUF_SIZE;
+    recvCircBuf.buffer = recvCircBufPhysical;
+    recvCircBuf.head = 0;
+    recvCircBuf.tail = 0;
+    recvCircBuf.maxlen = BUF_SIZE;
+    
+    sendCircBuf.buffer = sendCircBufPhysical;
+    sendCircBuf.head = 0;
+    sendCircBuf.tail = 0;
+    sendCircBuf.maxlen = BUF_SIZE;
 
     uint8_t temp;
+    uint8_t temp2;
     uint16_t address = 0;
     bool argsMode = false;
     uint8_t arg = 0;
     uint8_t numBytesRead = 0;
     while (1)
     {
-        while(!circ_bbuf_pop(&msgBuf, &temp)){
+        while(!circ_bbuf_pop(&recvCircBuf, &temp)){
             if(argsMode){
                 if(arg == 'm'){
                     address++;
@@ -225,7 +244,9 @@ void main(void)
                     case 1:
                         address += temp;
                         temp = readByte(address);
-                        writeBuffer[0] = hexArr[temp >> 4];
+                        circ_bbuf_push(&sendCircBuf, hexArr[temp >> 4]);
+                        circ_bbuf_push(&sendCircBuf, hexArr[temp & 0xF]);
+                        /*writeBuffer[0] = hexArr[temp >> 4];
                         writeBuffer[1] = hexArr[temp & 0xF];
                         writeBuffer[2] = ' ';
                         writeBuffer[3] = hexArr[(address >> 12) & 0xF];
@@ -234,7 +255,7 @@ void main(void)
                         writeBuffer[6] = hexArr[address & 0xF];
                         writeBuffer[7] = '\n';
                         writeBuffer[8] = '\r';
-                        putUSBUSART(writeBuffer, 9);
+                        putsUSBUSART(writeBuffer, 9);*/
                         argsMode = false;
                         break;
                     }
@@ -264,7 +285,7 @@ void main(void)
                 }
                 
             }else{
-                switch(temp){
+                switch(temp){ // from host's perspective:
                     case 'r': // send 2 byte address, receive 2 byte hex
                     case 'w': // send 2 byte address, send 1 byte data
                     case 'm': // send 1 byte hex
@@ -274,16 +295,8 @@ void main(void)
                     case 'n': // receive 1 byte hex
                         address++;
                         temp = readByte(address);
-                        writeBuffer[0] = hexArr[temp >> 4];
-                        writeBuffer[1] = hexArr[temp & 0xF];
-                        writeBuffer[2] = ' ';
-                        writeBuffer[3] = hexArr[(address >> 12) & 0xF];
-                        writeBuffer[4] = hexArr[(address >> 8) & 0xF];
-                        writeBuffer[5] = hexArr[(address >> 4) & 0xF];
-                        writeBuffer[6] = hexArr[address & 0xF];
-                        writeBuffer[7] = '\n';
-                        writeBuffer[8] = '\r';
-                        putUSBUSART(writeBuffer, 9);
+                        circ_bbuf_push(&sendCircBuf, hexArr[temp >> 4]);
+                        circ_bbuf_push(&sendCircBuf, hexArr[temp & 0xF]);
                         break;
                 }
             }
